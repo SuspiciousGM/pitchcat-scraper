@@ -1,0 +1,33 @@
+name: Daily Tournament Scraper
+
+on:
+  schedule:
+    # Executa cada dia a les 7:00 AM hora espanyola (6:00 UTC)
+    - cron: '0 6 * * *'
+  workflow_dispatch:  # Permet executar manualment des de GitHub
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create credentials.json from secret
+        run: echo '${{ secrets.GOOGLE_CREDENTIALS }}' > credentials.json
+
+      - name: Run scraper
+        run: python scraper.py
+
+      - name: Clean up credentials
+        if: always()
+        run: rm -f credentials.json
