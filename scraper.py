@@ -7,85 +7,154 @@ import time
 
 SHEET_NAME = "Tornejos Pitch & Putt Catalunya"
 CREDENTIALS_FILE = "credentials.json"
-BASE_URL = "https://www.pitch.cat/calendari/index.php"
 DAYS_AHEAD = 60
 
-def fetch_tournaments_for_date(date):
-    date_str = date.strftime("%d/%m/%Y")
+def fetch_tournaments_range():
+    """Fetch tournaments using the date range search form"""
+    today = datetime.today()
+    end   = today + timedelta(days=DAYS_AHEAD)
+
+    url = "https://www.pitch.cat/calendari/index.php"
+    data = {
+        "cerca": "1",
+        "data_ini": today.strftime("%d/%m/%Y"),
+        "data_fi":  end.strftime("%d/%m/%Y"),
+        "nom": "",
+        "cc[]": "",
+        "mod[]": "",
+        "formula[]": "",
+    }
+
     try:
-        response = requests.get(
-            BASE_URL,
-            params={"cerca":"1","dia":date.strftime("%d"),"mes":date.strftime("%m"),"any":date.strftime("%Y")},
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=15
-        )
-        response.encoding = "iso-8859-1"
-        soup = BeautifulSoup(response.text, "html.parser")
+        r = requests.post(url, data=data,
+                          headers={"User-Agent": "Mozilla/5.0",
+                                   "Content-Type": "application/x-www-form-urlencoded"},
+                          timeout=20)
+        r.encoding = "iso-8859-1"
+        soup = BeautifulSoup(r.text, "html.parser")
+
         tournaments = []
-        names   = soup.find_all("h4")
-        modals  = soup.find_all("h6")
-        courses = soup.find_all("h5")
-        for i, name_tag in enumerate(names):
-            name   = name_tag.get_text(strip=True)
-            modal  = modals[i].get_text(strip=True) if i < len(modals) else ""
-            course = courses[i].get_text(strip=True) if i < len(courses) else ""
-            if not name or len(name) < 3:
+
+        # Each tournament: h4=nom, h6=modalitat+formula, h5=camp
+        # They're wrapped in <a href="torneig.php?id=...">
+        links = soup.find_all("a", href=lambda h: h and "torneig.php?id=" in h)
+
+        for link in links:
+            name_tag   = link.find("h4")
+            modal_tag  = link.find("h6")
+            course_tag = link.find("h5")
+            date_tag   = link.find("span") or link.find("div", class_="data")
+
+            if not name_tag:
                 continue
-            parts    = modal.split(" ", 1)
-            modality = parts[0] if parts else ""
-            formula  = parts[1] if len(parts) > 1 else ""
-            parent   = name_tag.find_parent("a")
-            url = ""
-            if parent and parent.get("href"):
-                href = parent["href"]
-                url = f"https://www.pitch.cat/calendari/{href}" if not href.startswith("http") else href
+
+            name   = name_tag.get_text(strip=True)
+            modal  = modal_tag.get_text(strip=True)  if modal_tag  else ""
+            course = course_tag.get_text(strip=True) if course_tag else ""
+            date   = date_tag.get_text(strip=True)   if date_tag   else ""
+
+            href = link.get("href","")
+            full_url = f"https://www.pitch.cat/calendari/{href}" if not href.startswith("http") else href
+
             tournaments.append({
-                "Data":date_str,"Camp":course,"Torneig":name,
-                "Modalitat":modality,"Formula":formula,
-                "Font":"pitch.cat","URL":url or BASE_URL,
-                "Actualitzat":datetime.now().strftime("%d/%m/%Y %H:%M"),
+                "Data":        date,
+                "Camp":        course,
+                "Torneig":     name,
+                "Modalitat":   modal,
+                "Font":        "pitch.cat",
+                "URL":         full_url,
+                "Actualitzat": datetime.now().strftime("%d/%m/%Y %H:%M"),
             })
+
+        print(f"Trobats {len(tournaments)} tornejos")
         return tournaments
+
     except Exception as e:
-        print(f"  Error {date_str}: {e}")
+        print(f"Error: {e}")
         return []
 
-def scrape_all_tournaments():
+
+def fetch_by_day_fallback():
+    """Fallback: scrape day by day"""
     all_t = []
     today = datetime.today()
-    print(f"Scraping {DAYS_AHEAD} dies...")
+    url   = "https://www.pitch.cat/calendari/index.php"
+
     for i in range(DAYS_AHEAD):
         date = today + timedelta(days=i)
         print(f"  {date.strftime('%d/%m/%Y')}...", end=" ", flush=True)
-        t = fetch_tournaments_for_date(date)
-        all_t.extend(t)
-        print(len(t) if t else "-")
-        time.sleep(0.4)
+        try:
+            r = requests.post(url,
+                data={"cerca":"1",
+                      "dia": date.strftime("%d"),
+                      "mes": date.strftime("%m"),
+                      "any": date.strftime("%Y")},
+                headers={"User-Agent":"Mozilla/5.0",
+                         "Referer":"https://www.pitch.cat/calendari/index.php"},
+                timeout=15)
+            r.encoding = "iso-8859-1"
+            soup = BeautifulSoup(r.text, "html.parser")
+
+            links = soup.find_all("a", href=lambda h: h and "torneig.php?id=" in h)
+            day_t = []
+            for link in links:
+                name_tag   = link.find("h4")
+                modal_tag  = link.find("h6")
+                course_tag = link.find("h5")
+                if not name_tag:
+                    continue
+                name   = name_tag.get_text(strip=True)
+                modal  = modal_tag.get_text(strip=True)  if modal_tag  else ""
+                course = course_tag.get_text(strip=True) if course_tag else ""
+                href   = link.get("href","")
+                full_url = f"https://www.pitch.cat/calendari/{href}"
+                day_t.append({
+                    "Data":        date.strftime("%d/%m/%Y"),
+                    "Camp":        course,
+                    "Torneig":     name,
+                    "Modalitat":   modal,
+                    "Font":        "pitch.cat",
+                    "URL":         full_url,
+                    "Actualitzat": datetime.now().strftime("%d/%m/%Y %H:%M"),
+                })
+            all_t.extend(day_t)
+            print(len(day_t) if day_t else "-")
+        except Exception as e:
+            print(f"Error: {e}")
+        time.sleep(0.3)
+
     print(f"\nTotal: {len(all_t)} tornejos")
     return all_t
 
+
 def update_google_sheets(tournaments):
     print("Connectant a Google Sheets...")
-    scopes = ["https://www.googleapis.com/auth/spreadsheets","https://www.googleapis.com/auth/drive"]
+    scopes = ["https://www.googleapis.com/auth/spreadsheets",
+              "https://www.googleapis.com/auth/drive"]
     creds  = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
     client = gspread.authorize(creds)
+
     try:
         sheet = client.open(SHEET_NAME)
     except gspread.SpreadsheetNotFound:
         sheet = client.create(SHEET_NAME)
         sheet.share(None, perm_type="anyone", role="reader")
+
     try:
         ws = sheet.worksheet("Tornejos")
         ws.clear()
     except gspread.WorksheetNotFound:
         ws = sheet.add_worksheet("Tornejos", rows=2000, cols=10)
-    headers = ["Data","Camp","Torneig","Modalitat","Formula","Font","URL","Actualitzat"]
+
+    headers = ["Data","Camp","Torneig","Modalitat","Font","URL","Actualitzat"]
     rows = [headers] + [[t.get(h,"") for h in headers] for t in tournaments]
     ws.update("A1", rows)
+
     try:
         ws_meta = sheet.worksheet("Info")
     except gspread.WorksheetNotFound:
         ws_meta = sheet.add_worksheet("Info", rows=10, cols=2)
+
     ws_meta.update("A1",[
         ["Camp","Valor"],
         ["Ultima actualitzacio", datetime.now().strftime("%d/%m/%Y %H:%M")],
@@ -93,16 +162,25 @@ def update_google_sheets(tournaments):
         ["Font","pitch.cat"],
         ["URL Sheet", sheet.url],
     ])
+
     print(f"Escrit! {len(tournaments)} tornejos")
     print(f"URL: {sheet.url}")
     return sheet.url
 
+
 def main():
     print("PITCH & PUTT SCRAPER", datetime.now().strftime("%d/%m/%Y %H:%M"))
-    tournaments = scrape_all_tournaments()
+
+    # Try range search first, fall back to day-by-day
+    tournaments = fetch_tournaments_range()
+    if not tournaments:
+        print("Range search buit, provant dia a dia...")
+        tournaments = fetch_by_day_fallback()
+
     if not tournaments:
         print("No s'han trobat tornejos.")
         return
+
     update_google_sheets(tournaments)
     print("Fet!")
 
