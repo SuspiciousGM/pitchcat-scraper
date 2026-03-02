@@ -1,194 +1,110 @@
-"""
-pitch.cat Tournament Scraper
-Scrapes tournaments from pitch.cat and writes to Google Sheets
-"""
-
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 import gspread
 from google.oauth2.service_account import Credentials
-import json
-import os
 import time
 
-# ── CONFIG ────────────────────────────────────────────────────
 SHEET_NAME = "Tornejos Pitch & Putt Catalunya"
-CREDENTIALS_FILE = "credentials.json"  # Google Service Account JSON
-BASE_URL = "http://www.pitch.cat/calendari/index.php"
-
-# Quants dies endavant scrapejar (30 = proper mes)
+CREDENTIALS_FILE = "credentials.json"
+BASE_URL = "https://www.pitch.cat/calendari/index.php"
 DAYS_AHEAD = 60
 
-# ── SCRAPER ───────────────────────────────────────────────────
-def fetch_tournaments_for_date(date: datetime) -> list[dict]:
-    """Fetch all tournaments for a specific date from pitch.cat"""
+def fetch_tournaments_for_date(date):
     date_str = date.strftime("%d/%m/%Y")
-    
     try:
-        response = requests.post(
+        response = requests.get(
             BASE_URL,
-            data={
-                "cerca": "1",
-                "dia": date.strftime("%d"),
-                "mes": date.strftime("%m"),
-                "any": date.strftime("%Y"),
-            },
+            params={"cerca":"1","dia":date.strftime("%d"),"mes":date.strftime("%m"),"any":date.strftime("%Y")},
             headers={"User-Agent": "Mozilla/5.0"},
             timeout=15
         )
         response.encoding = "iso-8859-1"
         soup = BeautifulSoup(response.text, "html.parser")
-        
         tournaments = []
-        
-        # Find tournament table rows
-        rows = soup.select("table tr")
-        for row in rows:
-            cells = row.find_all("td")
-            if len(cells) >= 3:
-                # Skip header rows
-                text = [c.get_text(strip=True) for c in cells]
-                if not text[0] or text[0].lower() in ("data", "camp", "torneig"):
-                    continue
-                
-                tournament = {
-                    "Data": date_str,
-                    "Camp": text[0] if len(text) > 0 else "",
-                    "Torneig": text[1] if len(text) > 1 else "",
-                    "Modalitat": text[2] if len(text) > 2 else "",
-                    "Categoria": text[3] if len(text) > 3 else "",
-                    "Hora": text[4] if len(text) > 4 else "",
-                    "Inscripcions": text[5] if len(text) > 5 else "",
-                    "Font": "pitch.cat",
-                    "URL": BASE_URL,
-                    "Actualitzat": datetime.now().strftime("%d/%m/%Y %H:%M"),
-                }
-                tournaments.append(tournament)
-        
+        names   = soup.find_all("h4")
+        modals  = soup.find_all("h6")
+        courses = soup.find_all("h5")
+        for i, name_tag in enumerate(names):
+            name   = name_tag.get_text(strip=True)
+            modal  = modals[i].get_text(strip=True) if i < len(modals) else ""
+            course = courses[i].get_text(strip=True) if i < len(courses) else ""
+            if not name or len(name) < 3:
+                continue
+            parts    = modal.split(" ", 1)
+            modality = parts[0] if parts else ""
+            formula  = parts[1] if len(parts) > 1 else ""
+            parent   = name_tag.find_parent("a")
+            url = ""
+            if parent and parent.get("href"):
+                href = parent["href"]
+                url = f"https://www.pitch.cat/calendari/{href}" if not href.startswith("http") else href
+            tournaments.append({
+                "Data":date_str,"Camp":course,"Torneig":name,
+                "Modalitat":modality,"Formula":formula,
+                "Font":"pitch.cat","URL":url or BASE_URL,
+                "Actualitzat":datetime.now().strftime("%d/%m/%Y %H:%M"),
+            })
         return tournaments
-        
     except Exception as e:
-        print(f"  ⚠ Error fetching {date_str}: {e}")
+        print(f"  Error {date_str}: {e}")
         return []
 
-
-def scrape_all_tournaments(days_ahead: int = 60) -> list[dict]:
-    """Scrape tournaments for the next N days"""
-    all_tournaments = []
+def scrape_all_tournaments():
+    all_t = []
     today = datetime.today()
-    
-    print(f"🔍 Scraping {days_ahead} dies de tornejos...")
-    
-    for i in range(days_ahead):
+    print(f"Scraping {DAYS_AHEAD} dies...")
+    for i in range(DAYS_AHEAD):
         date = today + timedelta(days=i)
-        print(f"  📅 {date.strftime('%d/%m/%Y')}...", end=" ", flush=True)
-        
-        tournaments = fetch_tournaments_for_date(date)
-        all_tournaments.extend(tournaments)
-        
-        if tournaments:
-            print(f"✅ {len(tournaments)} tornejos")
-        else:
-            print("—")
-        
-        time.sleep(0.5)  # Respectful scraping
-    
-    print(f"\n✅ Total: {len(all_tournaments)} tornejos trobats")
-    return all_tournaments
+        print(f"  {date.strftime('%d/%m/%Y')}...", end=" ", flush=True)
+        t = fetch_tournaments_for_date(date)
+        all_t.extend(t)
+        print(len(t) if t else "-")
+        time.sleep(0.4)
+    print(f"\nTotal: {len(all_t)} tornejos")
+    return all_t
 
-
-# ── GOOGLE SHEETS ─────────────────────────────────────────────
-def update_google_sheets(tournaments: list[dict]):
-    """Write tournament data to Google Sheets"""
-    
-    print("\n📊 Connectant a Google Sheets...")
-    
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-    
-    creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
+def update_google_sheets(tournaments):
+    print("Connectant a Google Sheets...")
+    scopes = ["https://www.googleapis.com/auth/spreadsheets","https://www.googleapis.com/auth/drive"]
+    creds  = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
     client = gspread.authorize(creds)
-    
-    # Open or create sheet
     try:
         sheet = client.open(SHEET_NAME)
-        print(f"  ✅ Sheet '{SHEET_NAME}' trobat")
     except gspread.SpreadsheetNotFound:
         sheet = client.create(SHEET_NAME)
-        sheet.share(None, perm_type="anyone", role="reader")  # Public read
-        print(f"  ✅ Sheet '{SHEET_NAME}' creat")
-    
-    # Get or create worksheets
+        sheet.share(None, perm_type="anyone", role="reader")
     try:
-        ws_tornejos = sheet.worksheet("Tornejos")
-        ws_tornejos.clear()
+        ws = sheet.worksheet("Tornejos")
+        ws.clear()
     except gspread.WorksheetNotFound:
-        ws_tornejos = sheet.add_worksheet("Tornejos", rows=1000, cols=10)
-    
-    # Headers
-    headers = ["Data", "Camp", "Torneig", "Modalitat", "Categoria", "Hora", "Inscripcions", "Font", "URL", "Actualitzat"]
-    
-    # Build rows
-    rows = [headers]
-    for t in tournaments:
-        rows.append([t.get(h, "") for h in headers])
-    
-    # Write to sheet
-    ws_tornejos.update("A1", rows)
-    
-    # Format header row
-    ws_tornejos.format("A1:J1", {
-        "backgroundColor": {"red": 0.2, "green": 0.2, "blue": 0.2},
-        "textFormat": {"bold": True, "foregroundColor": {"red": 0.79, "green": 1.0, "blue": 0.3}},
-    })
-    
-    # Freeze header
-    sheet.batch_update({"requests": [{"updateSheetProperties": {
-        "properties": {"sheetId": ws_tornejos.id, "gridProperties": {"frozenRowCount": 1}},
-        "fields": "gridProperties.frozenRowCount"
-    }}]})
-    
-    # Update metadata tab
+        ws = sheet.add_worksheet("Tornejos", rows=2000, cols=10)
+    headers = ["Data","Camp","Torneig","Modalitat","Formula","Font","URL","Actualitzat"]
+    rows = [headers] + [[t.get(h,"") for h in headers] for t in tournaments]
+    ws.update("A1", rows)
     try:
         ws_meta = sheet.worksheet("Info")
     except gspread.WorksheetNotFound:
         ws_meta = sheet.add_worksheet("Info", rows=10, cols=2)
-    
-    ws_meta.update("A1", [
-        ["Camp", "Valor"],
-        ["Última actualització", datetime.now().strftime("%d/%m/%Y %H:%M")],
+    ws_meta.update("A1",[
+        ["Camp","Valor"],
+        ["Ultima actualitzacio", datetime.now().strftime("%d/%m/%Y %H:%M")],
         ["Total tornejos", len(tournaments)],
-        ["Dies consultats", DAYS_AHEAD],
-        ["Font principal", "pitch.cat"],
+        ["Font","pitch.cat"],
         ["URL Sheet", sheet.url],
     ])
-    
-    print(f"  ✅ {len(tournaments)} tornejos escrits al Google Sheet")
-    print(f"  🔗 URL: {sheet.url}")
+    print(f"Escrit! {len(tournaments)} tornejos")
+    print(f"URL: {sheet.url}")
     return sheet.url
 
-
-# ── MAIN ──────────────────────────────────────────────────────
 def main():
-    print("=" * 50)
-    print("  PITCH & PUTT TOURNAMENT SCRAPER")
-    print(f"  {datetime.now().strftime('%d/%m/%Y %H:%M')}")
-    print("=" * 50)
-    
-    tournaments = scrape_all_tournaments(DAYS_AHEAD)
-    
+    print("PITCH & PUTT SCRAPER", datetime.now().strftime("%d/%m/%Y %H:%M"))
+    tournaments = scrape_all_tournaments()
     if not tournaments:
-        print("⚠ No s'han trobat tornejos. Revisa la connexió o l'estructura de la web.")
+        print("No s'han trobat tornejos.")
         return
-    
-    url = update_google_sheets(tournaments)
-    
-    print("\n🎉 Fet!")
-    print(f"   Google Sheet: {url}")
-
+    update_google_sheets(tournaments)
+    print("Fet!")
 
 if __name__ == "__main__":
     main()
